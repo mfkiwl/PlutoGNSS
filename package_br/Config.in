@@ -1,0 +1,8 @@
+config BR2_PACKAGE_PLUTOGNSS
+        bool "plutognss"
+        help
+          This is the ESA GNSS timestamping helper TCP server 
+          utility running on the PlutoSDR rootfs
+          
+          https://github.com/Arribas/PlutoGNSS
+

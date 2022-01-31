@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2011 Carles Fernandez-Prades <carles.fernandez(at)cttc.es>
+*~
+.*.swp
+thirdparty/
+.settings
+.project
+.cproject
+.idea
+cmake-build-debug/
+/install
+/build
+/externals
+.DS_Store
+.pydevproject
+.vscode/
+.vs/
