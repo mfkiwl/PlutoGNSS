@@ -1,4 +1,4 @@
-# Copyright (C) 2021 J. Arribas and C. Fernandez-Prades. All rights reserved.
+# Copyright (C) 2019 J. Arribas and C. Fernandez-Prades. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -27,31 +27,6 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 #
-# This file is part of PLUTOGNSS
+# This file is part of GNSS-SDR-SIM
 
-add_executable(plutognsstest ${CMAKE_CURRENT_SOURCE_DIR}/test.cc ${CMAKE_SOURCE_DIR}/src/libs/uio_helper.c)
-
-target_link_libraries(plutognsstest
-    PUBLIC
-        libs
-        Threads::Threads
-        ${Boost_LIBRARIES}
-)
-
-target_include_directories(plutognsstest
-    PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/libs
-)
-
-target_compile_definitions(plutognsstest PRIVATE -DPLUTOGNSSTEST_VERSION="${VERSION}")
-
-
-add_custom_command(TARGET plutognsstest
-    POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:plutognsstest>
-        ${CMAKE_SOURCE_DIR}/install/$<TARGET_FILE_NAME:plutognsstest>
-)
-
-install(TARGETS plutognsstest
-    RUNTIME DESTINATION bin
-    COMPONENT "plutognsstest"
-)
+add_subdirectory(libs)

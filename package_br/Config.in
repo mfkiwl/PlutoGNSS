@@ -1,5 +1,15 @@
 config BR2_PACKAGE_PLUTOGNSS
         bool "plutognss"
+        depends on BR2_INSTALL_LIBSTDCPP # boost
+        depends on BR2_TOOLCHAIN_HAS_THREADS # alsa-lib, boost, libusb
+        depends on BR2_USE_WCHAR # boost
+	select BR2_PACKAGE_BOOST
+	select BR2_PACKAGE_BOOST_DATE_TIME
+	select BR2_PACKAGE_BOOST_FILESYSTEM
+	select BR2_PACKAGE_BOOST_PROGRAM_OPTIONS
+	select BR2_PACKAGE_BOOST_SYSTEM
+	select BR2_PACKAGE_BOOST_THREAD
+	select BR2_PACKAGE_BOOST_PROGRAM_OPTION
         help
           This is the ESA GNSS timestamping helper TCP server 
           utility running on the PlutoSDR rootfs

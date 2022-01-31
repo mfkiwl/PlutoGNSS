@@ -27,31 +27,37 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 #
-# This file is part of PLUTOGNSS
+# This file is part of GNSS-SDR-SIM
 
-add_executable(plutognsstest ${CMAKE_CURRENT_SOURCE_DIR}/test.cc ${CMAKE_SOURCE_DIR}/src/libs/uio_helper.c)
 
-target_link_libraries(plutognsstest
-    PUBLIC
-        libs
-        Threads::Threads
-        ${Boost_LIBRARIES}
+set(LIBS_SOURCES
+    uio_helper.c
 )
 
-target_include_directories(plutognsstest
-    PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/libs
+set(LIBS_HEADERS
+    uio_helper.h
+    ip_regs_pps_samplestamp.h
 )
 
-target_compile_definitions(plutognsstest PRIVATE -DPLUTOGNSSTEST_VERSION="${VERSION}")
+list(SORT LIBS_SOURCES)
+list(SORT LIBS_HEADERS)
 
+source_group(Headers FILES ${LIBS_HEADERS})
 
-add_custom_command(TARGET plutognsstest
-    POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:plutognsstest>
-        ${CMAKE_SOURCE_DIR}/install/$<TARGET_FILE_NAME:plutognsstest>
+add_library(libs
+	${LIBS_SOURCES}
+    ${LIBS_HEADERS}
 )
 
-install(TARGETS plutognsstest
-    RUNTIME DESTINATION bin
-    COMPONENT "plutognsstest"
+#target_link_libraries(libs
+#    PUBLIC
+#        ${Boost_LIBRARIES}
+#    PRIVATE
+#        Gflags::gflags
+#		LimeSuite
+#)
+
+
+set_property(TARGET libs APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 )
