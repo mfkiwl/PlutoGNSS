@@ -96,12 +96,12 @@ int main(int argc, char **argv)
     if (device_name == "")
         {
             std::cerr << "PPS Samplestamp IP core not found!\n";
-            return false;
+            return -1;
         }
     if ((pps_samplestamp_device_descriptor = open(device_name.c_str(), O_RDWR | O_SYNC)) == -1)
         {
             std::cerr << "Cannot open device UIO " << device_name.c_str() << "\n";
-            return false;
+            return -1;
         }
     // constants
     const size_t PAGE_SIZE = 0x10000;
@@ -112,7 +112,7 @@ int main(int argc, char **argv)
     if (pps_samplestamp_map_base == reinterpret_cast<void *>(-1))
         {
             std::cerr << "Cannot map the FPGA IP module PPS Samplestamp into memory (UIO dev: " << device_name.c_str() << ")\n";
-            return false;
+            return -1;
         }
     else
         {
@@ -130,7 +130,7 @@ int main(int argc, char **argv)
     if (ip_hw_type != PPS_SAMPLESTAMP_IP_HW_TYPE)
         {
             std::cerr << "The device " << device_name.c_str() << " does not match the expected HW type" << std::endl;
-            return false;
+            return -1;
         }
 
 

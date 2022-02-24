@@ -27,38 +27,31 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 #
-# This file is part of GNSS-SDR-SIM
+# This file is part of PLUTOGNSS
 
+add_executable(plutognssstserver ${CMAKE_CURRENT_SOURCE_DIR}/stserver.cc ${CMAKE_SOURCE_DIR}/src/libs/uio_helper.c)
 
-set(LIBS_SOURCES
-    uio_helper.c
+target_link_libraries(plutognssstserver
+    PUBLIC
+        libs
+        Threads::Threads
+        ${Boost_LIBRARIES}
 )
 
-set(LIBS_HEADERS
-    uio_helper.h
-    ip_regs_pps_samplestamp.h
-    concurrent_queue.h
+target_include_directories(plutognssstserver
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/libs
 )
 
-list(SORT LIBS_SOURCES)
-list(SORT LIBS_HEADERS)
+target_compile_definitions(plutognssstserver PRIVATE -DPLUTOGNSSTEST_VERSION="${VERSION}")
 
-source_group(Headers FILES ${LIBS_HEADERS})
 
-add_library(libs
-	${LIBS_SOURCES}
-    ${LIBS_HEADERS}
+add_custom_command(TARGET plutognssstserver
+    POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:plutognssstserver>
+        ${CMAKE_SOURCE_DIR}/install/$<TARGET_FILE_NAME:plutognssstserver>
 )
 
-#target_link_libraries(libs
-#    PUBLIC
-#        ${Boost_LIBRARIES}
-#    PRIVATE
-#        Gflags::gflags
-#		LimeSuite
-#)
-
-
-set_property(TARGET libs APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+install(TARGETS plutognssstserver
+    RUNTIME DESTINATION bin
+    COMPONENT "plutognssstserver"
 )
