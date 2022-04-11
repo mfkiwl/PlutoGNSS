@@ -15,6 +15,7 @@
 #define PLUTOGNSSSTSERVER_VERSION "0.0.1"
 #endif
 
+#include "ip_regs_ad9361_dynamicbits.h"
 #include "ip_regs_pps_samplestamp.h"
 #include <boost/exception/diagnostic_information.hpp>  // for diagnostic_information
 #include <boost/exception/exception.hpp>               // for exception
@@ -28,7 +29,7 @@
 #include <signal.h>
 #include <string>
 #include <sys/mman.h>  // for mmap
-
+#include <vector>
 // headers for socket(), getaddrinfo() and friends
 #include "concurrent_queue.h"
 #include <arpa/inet.h>
@@ -47,6 +48,10 @@ int socket_desc;
 
 volatile unsigned *pps_samplestamp_map_base;
 int pps_samplestamp_device_descriptor;
+
+volatile unsigned *dynamicbits_map_base;
+int dynamicbits_device_descriptor;
+
 
 struct pps_info
 {
@@ -121,6 +126,107 @@ std::string FindDeviceByCoreName(std::string IP_name)
     return device_name;
 }
 
+void tcp_rx_cmd(int FD)
+{
+    //create a message buffer
+    char buf[1500];
+    std::string new_pps_line;
+    while (true)
+        {
+            int numBytesRead = recv(FD, buf, sizeof(buf), 0);
+            if (numBytesRead > 0)
+                {
+                    for (int i = 0; i < numBytesRead; i++)
+                        {
+                            char c = buf[i];
+                            if (c == '\n')
+                                {
+                                    if (new_pps_line.length() > 0)
+                                        {
+                                            //std::cout << "pps_tcp_rx debug: " << new_pps_line << "\n";
+                                            //parse string and push PPS data to the PPS queue
+                                            std::stringstream ss(new_pps_line);
+                                            std::vector<std::string> data;
+                                            while (ss.good())
+                                                {
+                                                    std::string substr;
+                                                    std::getline(ss, substr, ',');
+                                                    data.push_back(substr);
+                                                }
+                                            if (data.size() >= 2)
+                                                {
+                                                    //sample size (ss)
+                                                    std::size_t found = data.at(0).find("ssize=");
+                                                    if (found != std::string::npos)
+                                                        {
+                                                            try
+                                                                {
+                                                                    int sample_size = std::stoi(data.at(0).substr(found + 3).c_str(), NULL, 0);
+                                                                    if (sample_size <= 16 and sample_size > 0)
+                                                                        {
+                                                                            //send command to FPGA IP
+                                                                            dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_SAMPLE_OUT_SIZE] = sample_size;
+                                                                        }
+                                                                }
+                                                            catch (const std::exception &ex)
+                                                                {
+                                                                    std::cout << "tcp_rx_cmd debug: sc parse error str " << data.at(0) << "\n";
+                                                                }
+                                                        }
+                                                    else
+                                                        {
+                                                            std::cout << "tcp_rx_cmd debug: sc parse error str " << data.at(0) << "\n";
+                                                        }
+                                                    //bits selector bit shift left command (bs)
+                                                    found = data.at(1).find("bshift=");
+                                                    if (found != std::string::npos)
+                                                        {
+                                                            int bit_shift = std::stoi(data.at(0).substr(found + 3).c_str(), NULL, 0);
+                                                            if (bit_shift <= 16 and bit_shift >= 0)
+                                                                {
+                                                                    //send command to FPGA IP
+                                                                    dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_BITS_SHIFT_LEFT] = bit_shift;
+                                                                }
+                                                        }
+                                                    else
+                                                        {
+                                                            std::cout << "tcp_rx_cmd debug: o parse error str " << data.at(1) << "\n";
+                                                        }
+                                                    //enable (1) or disable (0) sample pattern counter
+                                                    found = data.at(1).find("spattern=");
+                                                    if (found != std::string::npos)
+                                                        {
+                                                            int enable_pattern = std::stoi(data.at(0).substr(found + 3).c_str(), NULL, 0);
+                                                            if (enable_pattern <= 1 and enable_pattern >= 0)
+                                                                {
+                                                                    //send command to FPGA IP
+                                                                    dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_ENABLE_PATTERN] = enable_pattern;
+                                                                }
+                                                        }
+                                                    else
+                                                        {
+                                                            std::cout << "tcp_rx_cmd debug: o parse error str " << data.at(1) << "\n";
+                                                        }
+                                                }
+                                            else
+                                                {
+                                                    std::cout << "tcp_rx_cmd debug: protocol error!\n";
+                                                }
+                                            new_pps_line = "";
+                                        }
+                                }
+                            else
+                                new_pps_line += c;
+                        }
+                }
+            else
+                {
+                    std::cout << "pps_tcp_rx: Socket disconnected!\n!";
+                    break;
+                }
+        }
+    return;
+}
 int tcp_server_single(int port)
 {
     std::string portNum = std::to_string(port);
@@ -243,43 +349,19 @@ bool wait_pps_interrupt(uint64_t *pps_samplestamp, uint32_t *overflow_flag)
 }
 
 
-int main(int argc, char **argv)
+bool check_pps_ip()
 {
-    const std::string intro_help(
-        std::string("\nPLUTOGNSS Samplestamp Server is a tool to send the Samplestamp associated to the GNSS PPS rising edge to a remote device over TCP.\n") +
-        "Copyright (C) 2022 (see AUTHORS file for a list of contributors)\n" +
-        "This program comes with ABSOLUTELY NO WARRANTY;\n" +
-        "See COPYING file to see a copy of the General Public License\n \n");
-
-    const std::string version(PLUTOGNSSSTSERVER_VERSION);
-
-    std::cout << "Initializing PLUTOGNSS Samplestamp Server v" << version << " ... Please wait." << std::endl;
-
-    pps_info_queue = std::shared_ptr<Concurrent_Queue<pps_info>>(new Concurrent_Queue<pps_info>());
-
-    server_active = true;
-    signal(SIGINT, intHandler);
-
-    // setup TCP server
-    int tcp_port = 10000;
-
-    //start record to file thread
-    std::thread tcp_thread;
-    tcp_thread = std::thread(&tcp_server_single, tcp_port);
-
-    std::cout << "PLUTOGNSS Samplestamp Server is listening for TCP connections on port " << tcp_port << " on all network interfaces..." << std::endl;
-
     // check FPGA PPS IP and UIO interface
     std::string device_name = FindDeviceByCoreName("pps_samplestamp");
     if (device_name == "")
         {
             std::cout << "PPS Samplestamp IP core not found!\n";
-            return -1;
+            return false;
         }
     if ((pps_samplestamp_device_descriptor = open(device_name.c_str(), O_RDWR | O_SYNC)) == -1)
         {
             std::cout << "Cannot open device UIO " << device_name.c_str() << "\n";
-            return -1;
+            return false;
         }
     // constants
     const size_t PAGE_SIZE = 0x10000;
@@ -290,7 +372,7 @@ int main(int argc, char **argv)
     if (pps_samplestamp_map_base == reinterpret_cast<void *>(-1))
         {
             std::cout << "Cannot map the FPGA IP module PPS Samplestamp into memory (UIO dev: " << device_name.c_str() << ")\n";
-            return -1;
+            return false;
         }
     else
         {
@@ -307,8 +389,93 @@ int main(int argc, char **argv)
     if (ip_hw_type != PPS_SAMPLESTAMP_IP_HW_TYPE)
         {
             std::cout << "The device " << device_name.c_str() << " does not match the expected HW type" << std::endl;
+            return false;
+        }
+    return true;
+}
+
+bool check_dynamicbits_ip()
+{
+    // check FPGA AD9361 DYNAMICBITS IP and UIO interface
+    std::string device_name = FindDeviceByCoreName("ad9361_dynamicbits");
+    if (device_name == "")
+        {
+            std::cout << "AD9361 Dynamic Bits selector IP core not found!\n";
+            return false;
+        }
+    if ((dynamicbits_device_descriptor = open(device_name.c_str(), O_RDWR | O_SYNC)) == -1)
+        {
+            std::cout << "Cannot open device UIO " << device_name.c_str() << "\n";
+            return false;
+        }
+    // constants
+    const size_t PAGE_SIZE = 0x10000;
+    dynamicbits_map_base = reinterpret_cast<volatile unsigned *>(
+        mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+            dynamicbits_device_descriptor, 0));
+
+    if (dynamicbits_map_base == reinterpret_cast<void *>(-1))
+        {
+            std::cout << "Cannot map the FPGA IP module AD9361 DYNAMICBITS into memory (UIO dev: " << device_name.c_str() << ")\n";
+            return false;
+        }
+    else
+        {
+            std::cout << "FPGA IP module AD9361 DYNAMICBITS memory successfully mapped (UIO dev: " << device_name.c_str() << ")\n";
+        }
+
+    // sanity check : check version register
+    uint32_t readval = dynamicbits_map_base[AD9361_DYNAMICBITS_IP_READ_HW_VERSION_REG];
+    uint32_t ip_hw_type = (readval & 0xFF00) >> 8;
+    uint32_t ip_hw_version = (readval & 0x00FF) >> 8;
+
+    std::cout << "Detected IP AD9361 DYNAMICBITS with HW Type " << ip_hw_type
+              << " rev. " << ip_hw_version << "\n";
+    if (ip_hw_type != AD9361_DYNAMICBITS_IP_HW_TYPE)
+        {
+            std::cout << "The device " << device_name.c_str() << " does not match the expected HW type" << std::endl;
+            return false;
+        }
+    return true;
+}
+int main(int argc, char **argv)
+{
+    const std::string intro_help(
+        std::string("\nPLUTOGNSS Samplestamp Server is a tool to send the Samplestamp associated to the GNSS PPS rising edge to a remote device over TCP.\n") +
+        "Copyright (C) 2022 (see AUTHORS file for a list of contributors)\n" +
+        "This program comes with ABSOLUTELY NO WARRANTY;\n" +
+        "See COPYING file to see a copy of the General Public License\n \n");
+
+    const std::string version(PLUTOGNSSSTSERVER_VERSION);
+
+    std::cout << "Initializing PLUTOGNSS Samplestamp Server v" << version << " ... Please wait." << std::endl;
+
+
+    if (check_pps_ip() == false)
+        {
+            std::cout << "PLUTOGNSS can not find the required FPGA PPS IP CORE!" << std::endl;
             return -1;
         }
+
+    if (check_dynamicbits_ip() == false)
+        {
+            std::cout << "PLUTOGNSS can not find the required FPGA DYNAMIC BITS IP CORE!" << std::endl;
+            return -1;
+        }
+
+    pps_info_queue = std::shared_ptr<Concurrent_Queue<pps_info>>(new Concurrent_Queue<pps_info>());
+
+    server_active = true;
+    signal(SIGINT, intHandler);
+
+    // setup TCP server
+    int tcp_port = 10000;
+
+    //start record to file thread
+    std::thread tcp_thread;
+    tcp_thread = std::thread(&tcp_server_single, tcp_port);
+
+    std::cout << "PLUTOGNSS Samplestamp Server is listening for TCP connections on port " << tcp_port << " on all network interfaces..." << std::endl;
 
     // wait loop
     pps_info new_pps;
