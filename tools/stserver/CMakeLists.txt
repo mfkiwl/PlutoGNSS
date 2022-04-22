@@ -33,7 +33,7 @@ add_executable(plutognssstserver ${CMAKE_CURRENT_SOURCE_DIR}/stserver.cc ${CMAKE
 
 target_link_libraries(plutognssstserver
     PUBLIC
-        libs
+        plutognsslibs
         Threads::Threads
         ${Boost_LIBRARIES}
 )

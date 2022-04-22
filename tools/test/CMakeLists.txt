@@ -33,7 +33,7 @@ add_executable(plutognsstest ${CMAKE_CURRENT_SOURCE_DIR}/test.cc ${CMAKE_SOURCE_
 
 target_link_libraries(plutognsstest
     PUBLIC
-        libs
+        plutognsslibs
         Threads::Threads
         ${Boost_LIBRARIES}
 )

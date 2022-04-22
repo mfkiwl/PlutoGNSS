@@ -33,10 +33,14 @@
 // headers for socket(), getaddrinfo() and friends
 #include "concurrent_queue.h"
 #include <arpa/inet.h>
+#include <getopt.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <syslog.h>
 #include <unistd.h>  // close()
+
 
 extern "C"
 {
@@ -46,12 +50,16 @@ extern "C"
 static volatile bool server_active;
 int socket_desc;
 
-volatile unsigned *pps_samplestamp_map_base;
+volatile unsigned *pps_samplestamp_map_base = NULL;
 int pps_samplestamp_device_descriptor;
 
-volatile unsigned *dynamicbits_map_base;
+volatile unsigned *dynamicbits_map_base = NULL;
 int dynamicbits_device_descriptor;
 
+//linux daemon stuff
+static int pid_fd = -1;
+static char *app_name = NULL;
+static char *pid_file_name = NULL;
 
 struct pps_info
 {
@@ -62,25 +70,56 @@ struct pps_info
 std::shared_ptr<Concurrent_Queue<pps_info>> pps_info_queue;
 
 
-void intHandler(int dummy __attribute__((unused)))
+/**
+ * \brief Callback function for handling signals.
+ * \param	sig	identifier of signal
+ */
+void handle_signal(int sig)
 {
-    server_active = false;
-    std::cout << "Sent notification to stop all threads\n";
-    pps_info tmp;
-    tmp.overflow = 0;
-    tmp.samplestamp = 0;
-    pps_info_queue->push(tmp);
-
-    // where socketfd is the socket you want to make non-blocking
-    int status = fcntl(socket_desc, F_SETFL, fcntl(socket_desc, F_GETFL, 0) | O_NONBLOCK);
-
-    if (status == -1)
+    if (sig == SIGINT)
         {
-            perror("calling fcntl");
-            // handle the error.  By the way, I've never seen fcntl fail in this way
+            std::cout << "stopping Pluto stserver ...\n";
+
+            server_active = false;
+            std::cout << "Sent notification to stop all threads\n";
+            pps_info tmp;
+            tmp.overflow = 0;
+            tmp.samplestamp = 0;
+            pps_info_queue->push(tmp);
+
+            // where socketfd is the socket you want to make non-blocking
+            int status = fcntl(socket_desc, F_SETFL, fcntl(socket_desc, F_GETFL, 0) | O_NONBLOCK);
+
+            if (status == -1)
+                {
+                    perror("calling fcntl");
+                    // handle the error.  By the way, I've never seen fcntl fail in this way
+                }
+
+            /* Unlock and close lockfile */
+            if (pid_fd != -1)
+                {
+                    lockf(pid_fd, F_ULOCK, 0);
+                    close(pid_fd);
+                }
+            /* Try to delete lockfile */
+            if (pid_file_name != NULL)
+                {
+                    unlink(pid_file_name);
+                }
+            /* Reset signal handling to default behavior */
+            signal(SIGINT, SIG_DFL);
+        }
+    else if (sig == SIGHUP)
+        {
+            std::cout << "Debug: reloading daemon config file ...\n";
+            //todo
+        }
+    else if (sig == SIGCHLD)
+        {
+            std::cout << "Debug: received SIGCHLD signal\n";
         }
 }
-
 
 std::string FindDeviceByCoreName(std::string IP_name)
 {
@@ -129,9 +168,9 @@ std::string FindDeviceByCoreName(std::string IP_name)
 void tcp_rx_cmd(int FD)
 {
     //create a message buffer
-    char buf[1500];
+    char buf[500];
     std::string new_pps_line;
-    while (true)
+    while (server_active)
         {
             int numBytesRead = recv(FD, buf, sizeof(buf), 0);
             if (numBytesRead > 0)
@@ -143,88 +182,78 @@ void tcp_rx_cmd(int FD)
                                 {
                                     if (new_pps_line.length() > 0)
                                         {
-                                            //std::cout << "pps_tcp_rx debug: " << new_pps_line << "\n";
-                                            //parse string and push PPS data to the PPS queue
-                                            std::stringstream ss(new_pps_line);
-                                            std::vector<std::string> data;
-                                            while (ss.good())
+                                            //sample size (ss)
+                                            std::size_t found = new_pps_line.find("ssize=");
+                                            if (found != std::string::npos)
                                                 {
-                                                    std::string substr;
-                                                    std::getline(ss, substr, ',');
-                                                    data.push_back(substr);
+                                                    int sample_size = std::stoi(new_pps_line.substr(found + 6).c_str(), NULL, 0);
+                                                    if (sample_size <= 16 and sample_size > 0)
+                                                        {
+                                                            //send command to FPGA IP
+                                                            std::cout << "Send command to FPGA: " << new_pps_line << "\n";
+                                                            if (dynamicbits_map_base != NULL)
+                                                                {
+                                                                    dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_SAMPLE_OUT_SIZE] = sample_size;
+                                                                }
+                                                        }
+                                                    new_pps_line = "";
                                                 }
-                                            if (data.size() >= 2)
+                                            //bits selector bit shift left command (bs)
+                                            found = new_pps_line.find("bshift=");
+                                            if (found != std::string::npos)
                                                 {
-                                                    //sample size (ss)
-                                                    std::size_t found = data.at(0).find("ssize=");
-                                                    if (found != std::string::npos)
+                                                    int bit_shift = std::stoi(new_pps_line.substr(found + 7).c_str(), NULL, 0);
+                                                    if (bit_shift <= 16 and bit_shift >= 0)
                                                         {
-                                                            try
+                                                            //send command to FPGA IP
+                                                            std::cout << "Send command to FPGA: " << new_pps_line << "\n";
+                                                            if (dynamicbits_map_base != NULL)
                                                                 {
-                                                                    int sample_size = std::stoi(data.at(0).substr(found + 3).c_str(), NULL, 0);
-                                                                    if (sample_size <= 16 and sample_size > 0)
-                                                                        {
-                                                                            //send command to FPGA IP
-                                                                            dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_SAMPLE_OUT_SIZE] = sample_size;
-                                                                        }
-                                                                }
-                                                            catch (const std::exception &ex)
-                                                                {
-                                                                    std::cout << "tcp_rx_cmd debug: sc parse error str " << data.at(0) << "\n";
-                                                                }
-                                                        }
-                                                    else
-                                                        {
-                                                            std::cout << "tcp_rx_cmd debug: sc parse error str " << data.at(0) << "\n";
-                                                        }
-                                                    //bits selector bit shift left command (bs)
-                                                    found = data.at(1).find("bshift=");
-                                                    if (found != std::string::npos)
-                                                        {
-                                                            int bit_shift = std::stoi(data.at(0).substr(found + 3).c_str(), NULL, 0);
-                                                            if (bit_shift <= 16 and bit_shift >= 0)
-                                                                {
-                                                                    //send command to FPGA IP
                                                                     dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_BITS_SHIFT_LEFT] = bit_shift;
                                                                 }
                                                         }
-                                                    else
+                                                }
+                                            //enable (1) or disable (0) sample pattern counter
+                                            found = new_pps_line.find("spattern=");
+                                            if (found != std::string::npos)
+                                                {
+                                                    int enable_pattern = std::stoi(new_pps_line.substr(found + 9).c_str(), NULL, 0);
+                                                    if (enable_pattern <= 1 and enable_pattern >= 0)
                                                         {
-                                                            std::cout << "tcp_rx_cmd debug: o parse error str " << data.at(1) << "\n";
-                                                        }
-                                                    //enable (1) or disable (0) sample pattern counter
-                                                    found = data.at(1).find("spattern=");
-                                                    if (found != std::string::npos)
-                                                        {
-                                                            int enable_pattern = std::stoi(data.at(0).substr(found + 3).c_str(), NULL, 0);
-                                                            if (enable_pattern <= 1 and enable_pattern >= 0)
+                                                            //send command to FPGA IP
+                                                            std::cout << "Send command to FPGA: " << new_pps_line << "\n";
+                                                            if (dynamicbits_map_base != NULL)
                                                                 {
-                                                                    //send command to FPGA IP
                                                                     dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_ENABLE_PATTERN] = enable_pattern;
                                                                 }
                                                         }
-                                                    else
-                                                        {
-                                                            std::cout << "tcp_rx_cmd debug: o parse error str " << data.at(1) << "\n";
-                                                        }
+                                                    new_pps_line = "";
                                                 }
-                                            else
-                                                {
-                                                    std::cout << "tcp_rx_cmd debug: protocol error!\n";
-                                                }
-                                            new_pps_line = "";
                                         }
+                                    else
+                                        {
+                                            std::cout << "tcp_rx_cmd debug: protocol error!\n";
+                                        }
+                                    new_pps_line = "";
                                 }
+
                             else
                                 new_pps_line += c;
                         }
                 }
             else
                 {
-                    std::cout << "pps_tcp_rx: Socket disconnected!\n!";
+                    std::cout << "tcp_rx_cmd: Socket disconnected!\n!";
                     break;
                 }
         }
+    pps_info tmp;
+    tmp.overflow = 0;
+    tmp.samplestamp = 0;
+    pps_info_queue->push(tmp);
+    close(FD);
+    std::cout << "tcp_rx_cmd end!\n!";
+
     return;
 }
 int tcp_server_single(int port)
@@ -272,15 +301,18 @@ int tcp_server_single(int port)
     // a fresh infinite loop to communicate with incoming connections
     // this will take client connections one at a time
     // in further examples, we're going to use fork() call for each client connection
+    std::thread rx_cmd_thread;
     while (server_active)
         {
             // accept call will give us a new socket descriptor
+            std::cout << "Accepting new client...\n";
             int newFD = accept(socket_desc, (sockaddr *)&client_addr, &client_addr_size);
             if (newFD == -1)
                 {
                     std::cerr << "Error while Accepting on socket or clossing server...\n";
                     continue;
                 }
+            rx_cmd_thread = std::thread(&tcp_rx_cmd, newFD);
             while (server_active)
                 {
                     pps_info_queue->wait_and_pop(new_pps);
@@ -290,12 +322,22 @@ int tcp_server_single(int port)
                     if (bytes_sent <= 0)
                         {
                             std::cerr << "Connection terminated...\n";
+                            break;
                         }
                 }
             close(newFD);
+            if (rx_cmd_thread.joinable())
+                {
+                    rx_cmd_thread.join();
+                }
         }
 
     close(socket_desc);
+
+    if (rx_cmd_thread.joinable())
+        {
+            rx_cmd_thread.join();
+        }
 
     return 0;
 }
@@ -344,7 +386,11 @@ bool wait_pps_interrupt(uint64_t *pps_samplestamp, uint32_t *overflow_flag)
         }
 
     //clear interrupt
-    pps_samplestamp_map_base[PPS_SAMPLESTAMP_IP_WRITE_CLEAR_INTERRUPT_FLAG] = 1;
+    if (pps_samplestamp_map_base != NULL)
+        {
+            pps_samplestamp_map_base[PPS_SAMPLESTAMP_IP_WRITE_CLEAR_INTERRUPT_FLAG] = 1;
+        }
+
     return result;
 }
 
@@ -438,6 +484,108 @@ bool check_dynamicbits_ip()
         }
     return true;
 }
+
+
+/**
+ * \brief This function will daemonize this app
+ */
+static void daemonize()
+{
+    pid_t pid = 0;
+    int fd;
+
+    /* Fork off the parent process */
+    pid = fork();
+
+    /* An error occurred */
+    if (pid < 0)
+        {
+            exit(EXIT_FAILURE);
+        }
+
+    /* Success: Let the parent terminate */
+    if (pid > 0)
+        {
+            exit(EXIT_SUCCESS);
+        }
+
+    /* On success: The child process becomes session leader */
+    if (setsid() < 0)
+        {
+            exit(EXIT_FAILURE);
+        }
+
+    /* Ignore signal sent from child to parent process */
+    signal(SIGCHLD, SIG_IGN);
+
+    /* Fork off for the second time*/
+    pid = fork();
+
+    /* An error occurred */
+    if (pid < 0)
+        {
+            exit(EXIT_FAILURE);
+        }
+
+    /* Success: Let the parent terminate */
+    if (pid > 0)
+        {
+            exit(EXIT_SUCCESS);
+        }
+
+    /* Set new file permissions */
+    umask(0);
+
+    /* Change the working directory to the root directory */
+    /* or another appropriated directory */
+    chdir("/");
+
+    /* Close all open file descriptors */
+    for (fd = sysconf(_SC_OPEN_MAX); fd > 0; fd--)
+        {
+            close(fd);
+        }
+
+    /* Reopen stdin (fd = 0), stdout (fd = 1), stderr (fd = 2) */
+    stdin = fopen("/dev/null", "r");
+    stdout = fopen("/dev/null", "w+");
+    stderr = fopen("/dev/null", "w+");
+
+    /* Try to write PID of daemon to lockfile */
+    if (pid_file_name != NULL)
+        {
+            char str[256];
+            pid_fd = open(pid_file_name, O_RDWR | O_CREAT, 0640);
+            if (pid_fd < 0)
+                {
+                    /* Can't open lockfile */
+                    exit(EXIT_FAILURE);
+                }
+            if (lockf(pid_fd, F_TLOCK, 0) < 0)
+                {
+                    /* Can't lock file */
+                    exit(EXIT_FAILURE);
+                }
+            /* Get current PID */
+            sprintf(str, "%d\n", getpid());
+            /* Write PID to lockfile */
+            write(pid_fd, str, strlen(str));
+        }
+}
+
+/**
+ * \brief Print help for this application
+ */
+void print_help(void)
+{
+    printf("\n Usage: %s [OPTIONS]\n\n", app_name);
+    printf("  Options:\n");
+    printf("   -h --help                 Print this help\n");
+    printf("   -d --daemon               Daemonize this application\n");
+    printf("   -p --pid_file  filename   PID file used by daemonized app\n");
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     const std::string intro_help(
@@ -448,25 +596,71 @@ int main(int argc, char **argv)
 
     const std::string version(PLUTOGNSSSTSERVER_VERSION);
 
+    static struct option long_options[] = {
+        {"help", no_argument, 0, 'h'},
+        {"daemon", no_argument, 0, 'd'},
+        {"pid_file", required_argument, 0, 'p'},
+        {NULL, 0, 0, 0}};
+    int value, option_index = 0, ret;
+    char *log_file_name = NULL;
+    int start_daemonized = 0;
+
+    app_name = argv[0];
+
+    /* Try to process all command line arguments */
+    while ((value = getopt_long(argc, argv, "c:l:t:p:dh", long_options, &option_index)) != -1)
+        {
+            switch (value)
+                {
+                case 'p':
+                    pid_file_name = strdup(optarg);
+                    break;
+                case 'd':
+                    start_daemonized = 1;
+                    break;
+                case 'h':
+                    print_help();
+                    return EXIT_SUCCESS;
+                case '?':
+                    print_help();
+                    return EXIT_FAILURE;
+                default:
+                    break;
+                }
+        }
+
+    /* When daemonizing is requested at command line. */
+    if (start_daemonized == 1)
+        {
+            /* It is also possible to use glibc function deamon()
+		 * at this point, but it is useful to customize your daemon. */
+            daemonize();
+        }
+
+    syslog(LOG_INFO, "Started %s", app_name);
+
+    /* Daemon will handle two signals */
+    signal(SIGINT, handle_signal);
+    signal(SIGHUP, handle_signal);
+
     std::cout << "Initializing PLUTOGNSS Samplestamp Server v" << version << " ... Please wait." << std::endl;
 
 
     if (check_pps_ip() == false)
         {
             std::cout << "PLUTOGNSS can not find the required FPGA PPS IP CORE!" << std::endl;
-            return -1;
+            //return -1;
         }
 
     if (check_dynamicbits_ip() == false)
         {
             std::cout << "PLUTOGNSS can not find the required FPGA DYNAMIC BITS IP CORE!" << std::endl;
-            return -1;
+            //return -1;
         }
 
     pps_info_queue = std::shared_ptr<Concurrent_Queue<pps_info>>(new Concurrent_Queue<pps_info>());
 
     server_active = true;
-    signal(SIGINT, intHandler);
 
     // setup TCP server
     int tcp_port = 10000;
@@ -488,8 +682,18 @@ int main(int argc, char **argv)
         }
 
     std::cout << "Joining TCP thread...\n";
-    tcp_thread.join();
+    close(socket_desc);
+    //todo: force the detach and kill the thread
+    tcp_thread.detach();
     std::cout << "PLUTOGNSS Samplestamp Server program ended." << std::endl;
-    int return_code = 0;
-    return return_code;
+
+    /* Write system log and close it. */
+    syslog(LOG_INFO, "Stopped %s", app_name);
+    closelog();
+
+    /* Free allocated memory */
+    if (log_file_name != NULL) free(log_file_name);
+    if (pid_file_name != NULL) free(pid_file_name);
+
+    return EXIT_SUCCESS;
 }

@@ -45,20 +45,17 @@ list(SORT LIBS_HEADERS)
 
 source_group(Headers FILES ${LIBS_HEADERS})
 
-add_library(libs
+add_library(plutognsslibs
 	${LIBS_SOURCES}
     ${LIBS_HEADERS}
 )
 
-#target_link_libraries(libs
-#    PUBLIC
-#        ${Boost_LIBRARIES}
-#    PRIVATE
-#        Gflags::gflags
-#		LimeSuite
-#)
-
-
-set_property(TARGET libs APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES
+set_property(TARGET plutognsslibs APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 )
+
+install(TARGETS plutognsslibs
+    RUNTIME DESTINATION lib
+    COMPONENT "plutognsslibs"
+)
+
