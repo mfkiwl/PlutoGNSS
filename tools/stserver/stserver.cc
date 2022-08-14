@@ -12,7 +12,7 @@
 */
 
 #ifndef PLUTOGNSSSTSERVER_VERSION
-#define PLUTOGNSSSTSERVER_VERSION "0.0.1"
+#define PLUTOGNSSSTSERVER_VERSION "0.0.2"
 #endif
 
 #include "ip_regs_ad9361_dynamicbits.h"
@@ -53,8 +53,8 @@ int socket_desc;
 volatile unsigned *pps_samplestamp_map_base = NULL;
 int pps_samplestamp_device_descriptor;
 
-volatile unsigned *dynamicbits_map_base = NULL;
-int dynamicbits_device_descriptor;
+std::vector<volatile unsigned *> dynamicbits_map_bases;
+std::vector<int> dynamicbits_device_descriptors;
 
 //linux daemon stuff
 static int pid_fd = -1;
@@ -78,7 +78,7 @@ void handle_signal(int sig)
 {
     if (sig == SIGINT)
         {
-            std::cout << "stopping Pluto stserver ...\n";
+            std::cout << "Stopping Pluto stserver ...\n";
 
             server_active = false;
             std::cout << "Sent notification to stop all threads\n";
@@ -121,9 +121,9 @@ void handle_signal(int sig)
         }
 }
 
-std::string FindDeviceByCoreName(std::string IP_name)
+std::vector<std::string> FindDeviceByCoreName(std::string IP_name)
 {
-    std::string device_name = "";
+    std::vector<std::string> device_names;
 
     struct uio_info_t *info_list, *p;
 
@@ -131,7 +131,7 @@ std::string FindDeviceByCoreName(std::string IP_name)
     if (!info_list)
         {
             std::cout << "No UIO devices found.\n";
-            return device_name;
+            return device_names;
         }
 
     p = info_list;
@@ -145,24 +145,26 @@ std::string FindDeviceByCoreName(std::string IP_name)
             if (uio_name == IP_name)
                 {
                     std::cerr << "match: " << uio_name << "\n";
-                    device_name = "/dev/uio" + std::to_string(p->uio_num);
-                    break;
+                    device_names.push_back("/dev/uio" + std::to_string(p->uio_num));
                 }
             p = p->next;
         }
 
     uio_free_info(info_list);
 
-    if (device_name == "")
+    if (device_names.empty() == true)
         {
             std::cerr << "The device " << IP_name.c_str() << " is not present in UIO driver" << std::endl;
-            return device_name;
+            return device_names;
         }
     else
         {
-            std::cerr << "Found device " << device_name.c_str() << " asociated with " << IP_name.c_str() << std::endl;
+            for (auto it = std::begin(device_names); it != std::end(device_names); ++it)
+                {
+                    std::cerr << "Found device " << it->c_str() << " associated with " << IP_name.c_str() << std::endl;
+                }
         }
-    return device_name;
+    return device_names;
 }
 
 void tcp_rx_cmd(int FD)
@@ -191,9 +193,9 @@ void tcp_rx_cmd(int FD)
                                                         {
                                                             //send command to FPGA IP
                                                             std::cout << "Send command to FPGA: " << new_pps_line << "\n";
-                                                            if (dynamicbits_map_base != NULL)
+                                                            for (auto it = std::begin(dynamicbits_map_bases); it != std::end(dynamicbits_map_bases); ++it)
                                                                 {
-                                                                    dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_SAMPLE_OUT_SIZE] = sample_size;
+                                                                    (*it)[AD9361_DYNAMICBITS_IP_WRITE_SAMPLE_OUT_SIZE] = sample_size;
                                                                 }
                                                         }
                                                     new_pps_line = "";
@@ -207,9 +209,9 @@ void tcp_rx_cmd(int FD)
                                                         {
                                                             //send command to FPGA IP
                                                             std::cout << "Send command to FPGA: " << new_pps_line << "\n";
-                                                            if (dynamicbits_map_base != NULL)
+                                                            for (auto it = std::begin(dynamicbits_map_bases); it != std::end(dynamicbits_map_bases); ++it)
                                                                 {
-                                                                    dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_BITS_SHIFT_LEFT] = bit_shift;
+                                                                    (*it)[AD9361_DYNAMICBITS_IP_WRITE_BITS_SHIFT_LEFT] = bit_shift;
                                                                 }
                                                         }
                                                 }
@@ -222,9 +224,9 @@ void tcp_rx_cmd(int FD)
                                                         {
                                                             //send command to FPGA IP
                                                             std::cout << "Send command to FPGA: " << new_pps_line << "\n";
-                                                            if (dynamicbits_map_base != NULL)
+                                                            for (auto it = std::begin(dynamicbits_map_bases); it != std::end(dynamicbits_map_bases); ++it)
                                                                 {
-                                                                    dynamicbits_map_base[AD9361_DYNAMICBITS_IP_WRITE_ENABLE_PATTERN] = enable_pattern;
+                                                                    (*it)[AD9361_DYNAMICBITS_IP_WRITE_ENABLE_PATTERN] = enable_pattern;
                                                                 }
                                                         }
                                                     new_pps_line = "";
@@ -256,6 +258,8 @@ void tcp_rx_cmd(int FD)
 
     return;
 }
+
+
 int tcp_server_single(int port)
 {
     std::string portNum = std::to_string(port);
@@ -379,11 +383,11 @@ bool wait_pps_interrupt(uint64_t *pps_samplestamp, uint32_t *overflow_flag)
 
             result = true;
         }
-    else
-        {
-            //perror("poll()");
-            std::cerr << "ERROR: IRQ timeout\n";
-        }
+    //    else
+    //        {
+    //            //perror("poll()");
+    //            std::cerr << "ERROR: IRQ timeout\n";
+    //        }
 
     //clear interrupt
     if (pps_samplestamp_map_base != NULL)
@@ -397,16 +401,17 @@ bool wait_pps_interrupt(uint64_t *pps_samplestamp, uint32_t *overflow_flag)
 
 bool check_pps_ip()
 {
+    // only one device of pps samplestamp should be present
     // check FPGA PPS IP and UIO interface
-    std::string device_name = FindDeviceByCoreName("pps_samplestamp");
-    if (device_name == "")
+    std::vector<std::string> device_names = FindDeviceByCoreName("pps_samplestamp");
+    if (device_names.empty())
         {
             std::cout << "PPS Samplestamp IP core not found!\n";
             return false;
         }
-    if ((pps_samplestamp_device_descriptor = open(device_name.c_str(), O_RDWR | O_SYNC)) == -1)
+    if ((pps_samplestamp_device_descriptor = open(device_names.at(0).c_str(), O_RDWR | O_SYNC)) == -1)
         {
-            std::cout << "Cannot open device UIO " << device_name.c_str() << "\n";
+            std::cout << "Cannot open device UIO " << device_names.at(0).c_str() << "\n";
             return false;
         }
     // constants
@@ -417,12 +422,12 @@ bool check_pps_ip()
 
     if (pps_samplestamp_map_base == reinterpret_cast<void *>(-1))
         {
-            std::cout << "Cannot map the FPGA IP module PPS Samplestamp into memory (UIO dev: " << device_name.c_str() << ")\n";
+            std::cout << "Cannot map the FPGA IP module PPS Samplestamp into memory (UIO dev: " << device_names.at(0).c_str() << ")\n";
             return false;
         }
     else
         {
-            std::cout << "FPGA IP module PPS Samplestamp memory successfully mapped (UIO dev: " << device_name.c_str() << ")\n";
+            std::cout << "FPGA IP module PPS Samplestamp memory successfully mapped (UIO dev: " << device_names.at(0).c_str() << ")\n";
         }
 
     // sanity check : check version register
@@ -434,7 +439,7 @@ bool check_pps_ip()
               << " rev. " << ip_hw_version << "\n";
     if (ip_hw_type != PPS_SAMPLESTAMP_IP_HW_TYPE)
         {
-            std::cout << "The device " << device_name.c_str() << " does not match the expected HW type" << std::endl;
+            std::cout << "The device " << device_names.at(0).c_str() << " does not match the expected HW type" << std::endl;
             return false;
         }
     return true;
@@ -442,45 +447,52 @@ bool check_pps_ip()
 
 bool check_dynamicbits_ip()
 {
+    // may be multiple dynamic bits IP devices for multichannels (e.g. plutosdr with mimo 2x2 enabled).
     // check FPGA AD9361 DYNAMICBITS IP and UIO interface
-    std::string device_name = FindDeviceByCoreName("ad9361_dynamicbits");
-    if (device_name == "")
+    std::vector<std::string> device_names = FindDeviceByCoreName("ad9361_dynamicbits");
+    if (device_names.empty())
         {
             std::cout << "AD9361 Dynamic Bits selector IP core not found!\n";
             return false;
         }
-    if ((dynamicbits_device_descriptor = open(device_name.c_str(), O_RDWR | O_SYNC)) == -1)
-        {
-            std::cout << "Cannot open device UIO " << device_name.c_str() << "\n";
-            return false;
-        }
-    // constants
-    const size_t PAGE_SIZE = 0x10000;
-    dynamicbits_map_base = reinterpret_cast<volatile unsigned *>(
-        mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
-            dynamicbits_device_descriptor, 0));
 
-    if (dynamicbits_map_base == reinterpret_cast<void *>(-1))
+    for (auto it = std::begin(device_names); it != std::end(device_names); ++it)
         {
-            std::cout << "Cannot map the FPGA IP module AD9361 DYNAMICBITS into memory (UIO dev: " << device_name.c_str() << ")\n";
-            return false;
-        }
-    else
-        {
-            std::cout << "FPGA IP module AD9361 DYNAMICBITS memory successfully mapped (UIO dev: " << device_name.c_str() << ")\n";
-        }
+            int tmp_dev = open(it->c_str(), O_RDWR | O_SYNC);
+            if (tmp_dev == -1)
+                {
+                    std::cout << "Cannot open device UIO " << it->c_str() << "\n";
+                    return false;
+                }
+            dynamicbits_device_descriptors.push_back(tmp_dev);
+            // constants
+            const size_t PAGE_SIZE = 0x10000;
+            dynamicbits_map_bases.push_back(reinterpret_cast<volatile unsigned *>(
+                mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+                    dynamicbits_device_descriptors.back(), 0)));
 
-    // sanity check : check version register
-    uint32_t readval = dynamicbits_map_base[AD9361_DYNAMICBITS_IP_READ_HW_VERSION_REG];
-    uint32_t ip_hw_type = (readval & 0xFF00) >> 8;
-    uint32_t ip_hw_version = (readval & 0x00FF) >> 8;
+            if (dynamicbits_map_bases.back() == reinterpret_cast<void *>(-1))
+                {
+                    std::cout << "Cannot map the FPGA IP module AD9361 DYNAMICBITS into memory (UIO dev: " << it->c_str() << ")\n";
+                    return false;
+                }
+            else
+                {
+                    std::cout << "FPGA IP module AD9361 DYNAMICBITS memory successfully mapped (UIO dev: " << it->c_str() << ")\n";
+                }
 
-    std::cout << "Detected IP AD9361 DYNAMICBITS with HW Type " << ip_hw_type
-              << " rev. " << ip_hw_version << "\n";
-    if (ip_hw_type != AD9361_DYNAMICBITS_IP_HW_TYPE)
-        {
-            std::cout << "The device " << device_name.c_str() << " does not match the expected HW type" << std::endl;
-            return false;
+            // sanity check : check version register
+            uint32_t readval = dynamicbits_map_bases.back()[AD9361_DYNAMICBITS_IP_READ_HW_VERSION_REG];
+            uint32_t ip_hw_type = (readval & 0xFF00) >> 8;
+            uint32_t ip_hw_version = (readval & 0x00FF) >> 8;
+
+            std::cout << "Detected IP AD9361 DYNAMICBITS with HW Type " << ip_hw_type
+                      << " rev. " << ip_hw_version << "\n";
+            if (ip_hw_type != AD9361_DYNAMICBITS_IP_HW_TYPE)
+                {
+                    std::cout << "The device " << it->c_str() << " does not match the expected HW type" << std::endl;
+                    return false;
+                }
         }
     return true;
 }
@@ -589,7 +601,7 @@ void print_help(void)
 int main(int argc, char **argv)
 {
     const std::string intro_help(
-        std::string("\nPLUTOGNSS Samplestamp Server is a tool to send the Samplestamp associated to the GNSS PPS rising edge to a remote device over TCP.\n") +
+        std::string("\nPLUTOGNSS Samplestamp and Dynamic Sample Resolution Server is a tool to send the Samplestamp associated to the GNSS PPS rising edge to a remote device over TCP.\n") +
         "Copyright (C) 2022 (see AUTHORS file for a list of contributors)\n" +
         "This program comes with ABSOLUTELY NO WARRANTY;\n" +
         "See COPYING file to see a copy of the General Public License\n \n");
@@ -601,7 +613,7 @@ int main(int argc, char **argv)
         {"daemon", no_argument, 0, 'd'},
         {"pid_file", required_argument, 0, 'p'},
         {NULL, 0, 0, 0}};
-    int value, option_index = 0, ret;
+    int value, option_index = 0;
     char *log_file_name = NULL;
     int start_daemonized = 0;
 
@@ -643,7 +655,7 @@ int main(int argc, char **argv)
     signal(SIGINT, handle_signal);
     signal(SIGHUP, handle_signal);
 
-    std::cout << "Initializing PLUTOGNSS Samplestamp Server v" << version << " ... Please wait." << std::endl;
+    std::cout << "Initializing PLUTOGNSS Samplestamp Server and Dynamic Sample Resolution v" << version << " ... Please wait." << std::endl;
 
 
     if (check_pps_ip() == false)
@@ -669,7 +681,7 @@ int main(int argc, char **argv)
     std::thread tcp_thread;
     tcp_thread = std::thread(&tcp_server_single, tcp_port);
 
-    std::cout << "PLUTOGNSS Samplestamp Server is listening for TCP connections on port " << tcp_port << " on all network interfaces..." << std::endl;
+    std::cout << "PLUTOGNSS Samplestamp Server and Dynamic Sample Resolution is listening for TCP connections on port " << tcp_port << " on all network interfaces..." << std::endl;
 
     // wait loop
     pps_info new_pps;
@@ -685,7 +697,7 @@ int main(int argc, char **argv)
     close(socket_desc);
     //todo: force the detach and kill the thread
     tcp_thread.detach();
-    std::cout << "PLUTOGNSS Samplestamp Server program ended." << std::endl;
+    std::cout << "PLUTOGNSS Samplestamp Server and Dynamic Sample Resolution program ended." << std::endl;
 
     /* Write system log and close it. */
     syslog(LOG_INFO, "Stopped %s", app_name);
