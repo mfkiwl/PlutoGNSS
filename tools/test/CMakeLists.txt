@@ -41,6 +41,7 @@ target_link_libraries(plutognsstest
 target_include_directories(plutognsstest
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/libs
+        ${Boost_INCLUDE_DIR}
 )
 
 target_compile_definitions(plutognsstest PRIVATE -DPLUTOGNSSTEST_VERSION="${VERSION}")

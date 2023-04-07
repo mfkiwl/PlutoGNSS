@@ -41,6 +41,7 @@ target_link_libraries(plutognssstserver
 target_include_directories(plutognssstserver
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/libs
+        ${Boost_INCLUDE_DIR}
 )
 
 target_compile_definitions(plutognssstserver PRIVATE -DPLUTOGNSSTEST_VERSION="${VERSION}")
